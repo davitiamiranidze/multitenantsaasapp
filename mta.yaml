@@ -1,0 +1,195 @@
+_schema-version: 3.3.0
+ID: my-saas
+description: A simple CAP project.
+version: 1.0.0
+modules:
+  - name: my-saas-srv
+    type: nodejs
+    path: gen/srv
+    requires:
+      - name: my-saas-auth
+      - name: my-saas-db
+    provides:
+      - name: srv-api
+        properties:
+          srv-url: ${default-url}
+    parameters:
+      buildpack: nodejs_buildpack
+      instances: 1
+    build-parameters:
+      builder: npm-ci
+  - name: my-saas-mtx
+    type: nodejs
+    path: gen/mtx/sidecar
+    requires:
+      - name: my-saas-auth
+      - name: my-saas-db
+      - name: my-saas-registry
+      - name: app-api
+        properties:
+          SUBSCRIPTION_URL: ~{app-protocol}://\${tenant_subdomain}-~{app-uri}
+      - name: my-saas-html5-runtime
+      - name: my-saas-html5-repo-host
+    provides:
+      - name: mtx-api
+        properties:
+          mtx-url: ${default-url}
+    parameters:
+      disk-quota: 512M
+      instances: 1
+      memory: 256M
+    build-parameters:
+      builder: npm-ci
+    hooks:
+      - name: upgrade-all
+        type: task
+        phases:
+          - blue-green.application.before-start.idle
+          - deploy.application.before-start
+        parameters:
+          command: cds-mtx upgrade '*'
+          disk-quota: 768M
+          memory: 512M
+          name: upgrade
+  - name: my-saas
+    type: approuter.nodejs
+    path: app/router
+    properties:
+      TENANT_HOST_PATTERN: ^(.*)-${default-uri}
+    requires:
+      - name: srv-api
+        group: destinations
+        properties:
+          forwardAuthToken: true
+          name: srv-api
+          url: ~{srv-url}
+      - name: mtx-api
+        group: destinations
+        properties:
+          name: mtx-api
+          url: ~{mtx-url}
+      - name: my-saas-auth
+      - name: my-saas-html5-runtime
+      - name: my-saas-destination-service
+        group: destinations
+        properties:
+          forwardAuthToken: false
+          name: ui5
+          url: https://ui5.sap.com
+    provides:
+      - name: app-api
+        properties:
+          app-protocol: ${protocol}
+          app-uri: ${default-uri}
+    parameters:
+      disk-quota: 256M
+      keep-existing-routes: true
+      memory: 256M
+  - name: my-saas-app-deployer
+    type: com.sap.application.content
+    path: gen
+    requires:
+      - name: my-saas-auth
+      - name: srv-api
+      - name: my-saas-html5-repo-host
+        parameters:
+          config:
+            HTML5Runtime_enabled: true
+          content-target: true
+    build-parameters:
+      build-result: app/
+      requires:
+        - artifacts:
+            - catalogproject1.zip
+          name: catalogproject1
+          target-path: app/
+  - name: catalogproject1
+    type: html5
+    path: app/project1
+    build-parameters:
+      build-result: dist
+      builder: custom
+      commands:
+        - npm install
+        - npm run build:cf
+      supported-platforms: []
+resources:
+  - name: my-saas-auth
+    type: org.cloudfoundry.managed-service
+    parameters:
+      config:
+        oauth2-configuration:
+          credential-types:
+            - binding-secret
+            - x509
+          redirect-uris:
+            - https://*~{app-api/app-uri}/**
+        tenant-mode: shared
+        xsappname: my-saas-${org}-${space}
+      path: ./xs-security.json
+      service: xsuaa
+      service-plan: application
+    requires:
+      - name: app-api
+  - name: my-saas-db
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: service-manager
+      service-plan: container
+  - name: my-saas-registry
+    type: org.cloudfoundry.managed-service
+    parameters:
+      config:
+        appName: my-saas-${org}-${space}
+        appUrls:
+          callbackTimeoutMillis: 300000
+          getDependencies: ~{mtx-api/mtx-url}/-/cds/saas-provisioning/dependencies
+          onSubscription: ~{mtx-api/mtx-url}/-/cds/saas-provisioning/tenant/{tenantId}
+          onSubscriptionAsync: true
+          onUnSubscriptionAsync: true
+          onUpdateDependenciesAsync: true
+        category: Category
+        description: A simple CAP project.
+        displayName: my-saas
+        xsappname: my-saas-${org}-${space}
+      service: saas-registry
+      service-plan: application
+    requires:
+      - name: mtx-api
+  - name: my-saas-html5-repo-host
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: html5-apps-repo
+      service-plan: app-host
+  - name: my-saas-html5-runtime
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: html5-apps-repo
+      service-plan: app-runtime
+  - name: my-saas-destination-service
+    type: org.cloudfoundry.managed-service
+    parameters:
+      config:
+        HTML5Runtime_enabled: false
+        init_data:
+          instance:
+            destinations:
+              - Authentication: NoAuthentication
+                Name: ui5
+                ProxyType: Internet
+                Type: HTTP
+                URL: https://ui5.sap.com
+            existing_destinations_policy: update
+        version: 1.0.0
+      service: destination
+      service-name: my-saas-destination-service
+      service-plan: lite
+parameters:
+  deploy_mode: html5-repo
+  enable-parallel-deployments: true
+build-parameters:
+  before-all:
+    - builder: custom
+      commands:
+        - npm ci
+        - npx cds build --production
