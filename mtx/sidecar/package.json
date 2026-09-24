@@ -18,7 +18,8 @@
   "cds": {
     "profile": "mtx-sidecar",
     "requires": {
-      "html5-repo": true
+      "html5-repo": true,
+      "destinations": true
     }
   }
 }

@@ -18,6 +18,22 @@ modules:
       instances: 1
     build-parameters:
       builder: npm-ci
+  - name: my-saas-destination-reader
+    type: nodejs
+    path: destination-reader
+    requires:
+      - name: my-saas-auth
+      - name: my-saas-destination-service
+    provides:
+      - name: destination-reader-api
+        properties:
+          destination-reader-url: ${default-url}
+    parameters:
+      buildpack: nodejs_buildpack
+      instances: 1
+      memory: 128M
+    build-parameters:
+      builder: npm-ci
   - name: my-saas-mtx
     type: nodejs
     path: gen/mtx/sidecar
@@ -25,6 +41,7 @@ modules:
       - name: my-saas-auth
       - name: my-saas-db
       - name: my-saas-registry
+      - name: my-saas-destination-service
       - name: app-api
         properties:
           SUBSCRIPTION_URL: ~{app-protocol}://\${tenant_subdomain}-~{app-uri}
@@ -76,6 +93,12 @@ modules:
           forwardAuthToken: false
           name: ui5
           url: https://ui5.sap.com
+      - name: destination-reader-api
+        group: destinations
+        properties:
+          forwardAuthToken: true
+          name: destination-reader-api
+          url: ~{destination-reader-url}
     provides:
       - name: app-api
         properties:

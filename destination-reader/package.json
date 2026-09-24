@@ -1,0 +1,17 @@
+{
+  "name": "my-saas-destination-reader",
+  "version": "1.0.0",
+  "description": "Service for reading subscriber subaccount destinations",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@sap-cloud-sdk/connectivity": "^4.9.1",
+    "@sap/xsenv": "^6.0.0",
+    "express": "^5.1.0"
+  }
+}
