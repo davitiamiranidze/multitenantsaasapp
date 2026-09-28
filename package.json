@@ -31,7 +31,18 @@
         "multitenancy": true
       },
       "[with-mtx]": {
-        "multitenancy": true
+        "multitenancy": true,
+        "auth": {
+          "kind": "mocked",
+          "users": {
+            "alice": {
+              "tenant": "t1"
+            },
+            "bob": {
+              "tenant": "t2"
+            }
+          }
+        }
       },
       "html5-repo": true
     },

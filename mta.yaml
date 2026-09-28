@@ -24,6 +24,7 @@ modules:
     requires:
       - name: my-saas-auth
       - name: my-saas-destination-service
+      - name: my-saas-registry
     provides:
       - name: destination-reader-api
         properties:

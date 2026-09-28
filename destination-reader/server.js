@@ -1,80 +1,210 @@
 const express = require("express");
 
 const {
-  retrieveJwt,
-  decodeJwt,
-  serviceToken,
   getServiceBinding,
+  serviceToken,
+  decodeJwt,
 } = require("@sap-cloud-sdk/connectivity");
 
 const app = express();
 
-app.get("/destinations", async (req, res) => {
-  try {
-    const jwt = retrieveJwt(req);
+/**
+ * Fetch all consumers subscribed to our SaaS application.
+ *
+ * SaaS Registry tells us:
+ * - consumerTenantId -> tenant ID
+ * - subdomain        -> tenant subdomain
+ */
+async function getSubscriptions() {
+  const registry = getServiceBinding("saas-registry");
+  const token = await serviceToken("saas-registry");
 
-    if (!jwt) {
-      return res.status(401).json({
-        error: "No JWT received",
-      });
+  const baseUrl =
+    registry.credentials.saas_registry_url ||
+    registry.credentials.url;
+
+  const response = await fetch(
+    `${baseUrl}/saas-manager/v1/application/subscriptions`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
     }
+  );
 
-    const userJwt = decodeJwt(jwt);
-
-    // Get Destination Service token in CONSUMER tenant context
-    const token = await serviceToken("destination", {
-      jwt,
-    });
-
-    const destinationJwt = decodeJwt(token);
-
-    console.log("User tenant:", userJwt.zid);
-    console.log("Destination token tenant:", destinationJwt.zid);
-
-    // Get bound Destination Service
-    const binding = getServiceBinding("destination");
-
-    console.log("Destination binding:", binding.name);
-
-    const baseUrl =
-      binding.credentials.uri ||
-      binding.credentials.url;
-
-    const response = await fetch(
-      `${baseUrl}/destination-configuration/v1/subaccountDestinations`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
+  if (!response.ok) {
+    throw new Error(
+      `Failed to fetch subscriptions: ${response.status}`
     );
+  }
 
-    const body = await response.text();
+  const data = await response.json();
 
-    if (!response.ok) {
-      throw new Error(
-        `Destination Service returned ${response.status}: ${body}`
-      );
+  return data.subscriptions;
+}
+
+/**
+ * Get a Destination Service JWT for a specific subscriber.
+ *
+ * We use:
+ * - Destination Service client credentials
+ * - subscriber subdomain
+ *
+ * The token is therefore issued in that subscriber's tenant context.
+ */
+async function getDestinationToken(subscription) {
+  const destination = getServiceBinding("destination");
+
+  const {
+    clientid,
+    clientsecret,
+    url,
+  } = destination.credentials;
+
+  // Extract authentication domain from the provider URL.
+  // Example:
+  // provider.authentication.us10.hana.ondemand.com
+  // ->
+  // authentication.us10.hana.ondemand.com
+  const authDomain = new URL(url)
+    .hostname
+    .split(".")
+    .slice(1)
+    .join(".");
+
+  // Request the token from the subscriber's XSUAA tenant.
+  const tokenUrl =
+    `https://${subscription.subdomain}.${authDomain}/oauth/token`;
+
+  const basicAuth = Buffer.from(
+    `${clientid}:${clientsecret}`
+  ).toString("base64");
+
+  const response = await fetch(tokenUrl, {
+    method: "POST",
+
+    headers: {
+      Authorization: `Basic ${basicAuth}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+
+    body: new URLSearchParams({
+      grant_type: "client_credentials",
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `Failed to get Destination token for ${subscription.subdomain}`
+    );
+  }
+
+  const { access_token } = await response.json();
+
+  // Optional verification:
+  // zid should match subscription.consumerTenantId
+  const decoded = decodeJwt(access_token);
+
+  console.log(
+    `${subscription.subdomain}:`,
+    decoded.zid
+  );
+
+  return access_token;
+}
+
+/**
+ * Fetch all subaccount-level destinations for one subscriber.
+ */
+async function getDestinations(subscription) {
+  const destination = getServiceBinding("destination");
+
+  // Get a Destination Service token in THIS subscriber's context.
+  const token = await getDestinationToken(subscription);
+
+  const baseUrl =
+    destination.credentials.uri ||
+    destination.credentials.url;
+
+  const response = await fetch(
+    `${baseUrl}/destination-configuration/v1/subaccountDestinations`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
     }
+  );
 
-    const destinations = JSON.parse(body);
+  if (!response.ok) {
+    throw new Error(
+      `Failed to fetch destinations for ${subscription.subdomain}`
+    );
+  }
 
-    res.json({
-      userTenant: userJwt.zid,
-      destinationTokenTenant: destinationJwt.zid,
-      destinations,
-    });
+  return response.json();
+}
+
+/**
+ * Return all SaaS subscriptions.
+ */
+app.get("/subscriptions", async (req, res) => {
+  try {
+    res.json(await getSubscriptions());
   } catch (error) {
-    console.error("ERROR:", error);
-
     res.status(500).json({
       error: error.message,
     });
   }
 });
 
-const port = process.env.PORT || 3000;
+/**
+ * For every subscribed consumer:
+ *
+ * SaaS Registry
+ *      ↓
+ * tenant ID + subdomain
+ *      ↓
+ * subscriber Destination token
+ *      ↓
+ * Destination Service
+ *      ↓
+ * subscriber destinations
+ */
+app.get("/destinations", async (req, res) => {
+  try {
+    const subscriptions = await getSubscriptions();
+    const results = [];
 
-app.listen(port, () => {
-  console.log(`Destination reader running on ${port}`);
+    for (const subscription of subscriptions) {
+      try {
+        const destinations =
+          await getDestinations(subscription);
+
+        results.push({
+          tenantId: subscription.consumerTenantId,
+          subdomain: subscription.subdomain,
+          destinations,
+        });
+      } catch (error) {
+        // One failing tenant should not stop the others.
+        results.push({
+          tenantId: subscription.consumerTenantId,
+          subdomain: subscription.subdomain,
+          error: error.message,
+        });
+      }
+    }
+
+    res.json(results);
+  } catch (error) {
+    res.status(500).json({
+      error: error.message,
+    });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`Destination Reader running on port ${PORT}`);
 });
