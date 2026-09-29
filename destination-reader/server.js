@@ -3,26 +3,42 @@ const express = require("express");
 const {
   getServiceBinding,
   serviceToken,
-  decodeJwt,
+  getAllDestinationsFromDestinationService,
 } = require("@sap-cloud-sdk/connectivity");
 
 const app = express();
 
 /**
- * Fetch all consumers subscribed to our SaaS application.
+ * Fetch all consumer tenants currently subscribed
+ * to our multitenant SaaS application.
  *
- * SaaS Registry tells us:
- * - consumerTenantId -> tenant ID
- * - subdomain        -> tenant subdomain
+ * Flow:
+ * SaaS Registry binding
+ *      ↓
+ * Service token
+ *      ↓
+ * SaaS Registry API
+ *      ↓
+ * List of subscribed consumers
+ *
+ * Each subscription contains information such as:
+ * - consumerTenantId -> subscriber tenant ID (zid)
+ * - subdomain        -> subscriber subdomain
  */
 async function getSubscriptions() {
+  // Get the SaaS Registry service binding from the environment.
   const registry = getServiceBinding("saas-registry");
+
+  // Get a technical service-to-service access token
+  // for calling the SaaS Registry API.
   const token = await serviceToken("saas-registry");
 
+  // SaaS Registry API base URL.
   const baseUrl =
     registry.credentials.saas_registry_url ||
     registry.credentials.url;
 
+  // Fetch all subscriptions of this SaaS application.
   const response = await fetch(
     `${baseUrl}/saas-manager/v1/application/subscriptions`,
     {
@@ -44,104 +60,58 @@ async function getSubscriptions() {
 }
 
 /**
- * Get a Destination Service JWT for a specific subscriber.
+ * Build the XSUAA issuer URL (iss) for a subscriber.
  *
- * We use:
- * - Destination Service client credentials
- * - subscriber subdomain
+ * The Destination service binding contains the provider's
+ * XSUAA URL, for example:
  *
- * The token is therefore issued in that subscriber's tenant context.
+ * https://provider.authentication.us10.hana.ondemand.com
+ *
+ * We remove the provider subdomain:
+ *
+ * authentication.us10.hana.ondemand.com
+ *
+ * and replace it with the subscriber subdomain:
+ *
+ * https://consumer.authentication.us10.hana.ondemand.com
+ *
+ * The Cloud SDK uses this issuer to determine which
+ * subscriber tenant context should be used.
  */
-async function getDestinationToken(subscription) {
+function getSubscriberIss(subscription) {
   const destination = getServiceBinding("destination");
 
-  const {
-    clientid,
-    clientsecret,
-    url,
-  } = destination.credentials;
-
-  // Extract authentication domain from the provider URL.
-  // Example:
-  // provider.authentication.us10.hana.ondemand.com
-  // ->
-  // authentication.us10.hana.ondemand.com
-  const authDomain = new URL(url)
+  // Extract the authentication domain from the provider URL.
+  const authDomain = new URL(destination.credentials.url)
     .hostname
     .split(".")
     .slice(1)
     .join(".");
 
-  // Request the token from the subscriber's XSUAA tenant.
-  const tokenUrl =
-    `https://${subscription.subdomain}.${authDomain}/oauth/token`;
-
-  const basicAuth = Buffer.from(
-    `${clientid}:${clientsecret}`
-  ).toString("base64");
-
-  const response = await fetch(tokenUrl, {
-    method: "POST",
-
-    headers: {
-      Authorization: `Basic ${basicAuth}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-
-    body: new URLSearchParams({
-      grant_type: "client_credentials",
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      `Failed to get Destination token for ${subscription.subdomain}`
-    );
-  }
-
-  const { access_token } = await response.json();
-
-  // Optional verification:
-  // zid should match subscription.consumerTenantId
-  const decoded = decodeJwt(access_token);
-
-  console.log(
-    `${subscription.subdomain}:`,
-    decoded.zid
-  );
-
-  return access_token;
+  // Construct the subscriber-specific XSUAA issuer.
+  return `https://${subscription.subdomain}.${authDomain}`;
 }
 
 /**
- * Fetch all subaccount-level destinations for one subscriber.
+ * Fetch all subaccount-level destinations belonging
+ * to a specific subscriber.
+ *
+ * Instead of manually:
+ *
+ * 1. Requesting a Destination Service token
+ * 2. Calling /destination-configuration/v1/subaccountDestinations
+ *
+ * we give the subscriber issuer to the SAP Cloud SDK.
+ *
+ * The SDK handles the Destination Service authentication
+ * and request internally in the subscriber tenant context.
  */
 async function getDestinations(subscription) {
-  const destination = getServiceBinding("destination");
+  const iss = getSubscriberIss(subscription);
 
-  // Get a Destination Service token in THIS subscriber's context.
-  const token = await getDestinationToken(subscription);
-
-  const baseUrl =
-    destination.credentials.uri ||
-    destination.credentials.url;
-
-  const response = await fetch(
-    `${baseUrl}/destination-configuration/v1/subaccountDestinations`,
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    }
-  );
-
-  if (!response.ok) {
-    throw new Error(
-      `Failed to fetch destinations for ${subscription.subdomain}`
-    );
-  }
-
-  return response.json();
+  return getAllDestinationsFromDestinationService({
+    iss,
+  });
 }
 
 /**
@@ -149,7 +119,9 @@ async function getDestinations(subscription) {
  */
 app.get("/subscriptions", async (req, res) => {
   try {
-    res.json(await getSubscriptions());
+    const subscriptions = await getSubscriptions();
+
+    res.json(subscriptions);
   } catch (error) {
     res.status(500).json({
       error: error.message,
@@ -158,17 +130,27 @@ app.get("/subscriptions", async (req, res) => {
 });
 
 /**
- * For every subscribed consumer:
+ * Return destinations for every subscribed consumer.
+ *
+ * Flow:
  *
  * SaaS Registry
  *      ↓
- * tenant ID + subdomain
+ * List of subscriptions
  *      ↓
- * subscriber Destination token
+ * subscriber subdomain
+ *      ↓
+ * Build subscriber XSUAA issuer (iss)
+ *      ↓
+ * SAP Cloud SDK
  *      ↓
  * Destination Service
  *      ↓
- * subscriber destinations
+ * Subscriber's destinations
+ *
+ * Each subscriber is handled separately so that an error
+ * for one tenant does not prevent other tenants from
+ * being processed.
  */
 app.get("/destinations", async (req, res) => {
   try {
@@ -177,6 +159,7 @@ app.get("/destinations", async (req, res) => {
 
     for (const subscription of subscriptions) {
       try {
+        // Fetch destinations in this subscriber's tenant context.
         const destinations =
           await getDestinations(subscription);
 
@@ -186,7 +169,8 @@ app.get("/destinations", async (req, res) => {
           destinations,
         });
       } catch (error) {
-        // One failing tenant should not stop the others.
+        // Keep processing the remaining subscribers
+        // even if this subscriber fails.
         results.push({
           tenantId: subscription.consumerTenantId,
           subdomain: subscription.subdomain,
@@ -203,6 +187,8 @@ app.get("/destinations", async (req, res) => {
   }
 });
 
+// Cloud Foundry provides PORT automatically.
+// 3000 is used when running locally.
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
