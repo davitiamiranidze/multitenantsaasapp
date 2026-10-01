@@ -25,6 +25,7 @@ modules:
       - name: my-saas-auth
       - name: my-saas-destination-service
       - name: my-saas-registry
+      - name: my-saas-xsuaa-api
     provides:
       - name: destination-reader-api
         properties:
@@ -138,6 +139,11 @@ modules:
         - npm run build:cf
       supported-platforms: []
 resources:
+  - name: my-saas-xsuaa-api
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: xsuaa
+      service-plan: apiaccess
   - name: my-saas-auth
     type: org.cloudfoundry.managed-service
     parameters:

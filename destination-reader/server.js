@@ -1,6 +1,7 @@
 const express = require("express");
 
 const {
+  decodeJwt,
   getServiceBinding,
   serviceToken,
   getAllDestinationsFromDestinationService,
@@ -181,6 +182,56 @@ app.get("/destinations", async (req, res) => {
 
     res.json(results);
   } catch (error) {
+    res.status(500).json({
+      error: error.message,
+    });
+  }
+});
+
+
+app.get("/role-collections", async (req, res) => {
+  try {
+    // Get the XSUAA apiaccess binding
+    const binding = getServiceBinding("xsuaa", {
+      serviceInstanceName: "my-saas-xsuaa-api",
+    });
+
+    // Get client_credentials token from that same XSUAA instance
+    const token = await serviceToken("xsuaa", {
+      serviceBindingOptions: {
+        serviceInstanceName: "my-saas-xsuaa-api",
+      },
+    });
+
+    // Call XSUAA Role Collections API
+    const response = await fetch(
+      `${binding.credentials.apiurl}/sap/rest/authorization/v2/rolecollections`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+        },
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.text();
+
+      return res.status(response.status).json({
+        error: "Failed to fetch role collections",
+        details: error,
+      });
+    }
+
+    const roleCollections = await response.json();
+
+    res.json({
+      roleCollections,
+    });
+  } catch (error) {
+    console.error(error);
+
     res.status(500).json({
       error: error.message,
     });
