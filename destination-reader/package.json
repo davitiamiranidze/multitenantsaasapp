@@ -4,7 +4,13 @@
   "description": "Service for reading subscriber subaccount destinations",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "start:local": "PORT=4005 cds bind --exec -- npm start",
+    "test:tenants": "curl -i http://127.0.0.1:4005/tenants",
+    "test:destinations": "curl -i http://127.0.0.1:4005/tenants-destinations",
+    "test:tokens": "curl -i http://127.0.0.1:4005/xsuaa-subscriber-tokens",
+    "test:roles": "curl -i http://127.0.0.1:4005/provider-role-collections",
+    "test:all": "npm run test:tenants && npm run test:destinations && npm run test:tokens && npm run test:roles"
   },
   "engines": {
     "node": ">=20"
