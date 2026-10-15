@@ -26,25 +26,35 @@
   "private": true,
   "cds": {
     "requires": {
-      "[production]": {
+      "html5-repo": true
+    },
+    "[production]": {
+      "requires": {
         "auth": "xsuaa",
         "multitenancy": true
-      },
-      "[with-mtx]": {
+      }
+    },
+    "[with-mtx]": {
+      "requires": {
         "multitenancy": true,
         "auth": {
           "kind": "mocked",
           "users": {
             "alice": {
-              "tenant": "t1"
+              "tenant": "t1",
+              "roles": [
+                "admin"
+              ]
             },
             "bob": {
-              "tenant": "t2"
+              "tenant": "t2",
+              "roles": [
+                "admin"
+              ]
             }
           }
         }
-      },
-      "html5-repo": true
+      }
     },
     "profile": "with-mtx-sidecar"
   },
